@@ -33,11 +33,15 @@ def sub_line(i, s):
         f'fill="{s.get("fill", "#ffffff")}"',
         f'stroke="{s.get("stroke", "#1b1b1b")}"',
         f'hi="{s.get("hi", "#ffd23f")}"',
+        f'box="{s.get("box") if s.get("box") in BOXES else "none"}"',
     ]
     return "    <Sub " + " ".join(attrs) + " />"
 
 
-def write_project(studio, pid, video, subs, layout, aspect, duration):
+BOXES = ("none", "black", "yellow", "white")  # studio/src/SubClip.tsx 의 BOX_KEYS 와 같아야 한다
+
+
+def write_project(studio, pid, video, subs, layout, aspect, duration, frame="blur"):
     studio = Path(studio)
     media = studio / "public" / "media"
     media.mkdir(parents=True, exist_ok=True)
@@ -53,7 +57,7 @@ export const meta = {{ id: "{pid}", frames: {frames} }};
 
 export const Component: React.FC = () => (
   <AbsoluteFill>
-    <Frame src="media/{pid}.mp4" layout="{layout}" aspect={{{aspect:.4f}}} />
+    <Frame src="media/{pid}.mp4" layout="{layout}" aspect={{{aspect:.4f}}} bg="{"black" if frame == "black" else "blur"}" />
 {body}
   </AbsoluteFill>
 );

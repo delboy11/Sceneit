@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import ai
+from . import ai, presets
 from .cut import clamp, render_cut
 from .export import project_id, write_project
 from .fontsheet import make_font_sheets
@@ -20,6 +20,10 @@ WORK = ROOT / "work"
 CUT_RULES = {
     "minimal": "   - **컷 편집은 최소한으로.** 원본을 최대한 길게 이어서 쓰고, 꼭 빼야 하는 부분(흔들림, 의미 없는 구간, 화면이 가려진 구간 등)만 잘라낸다.\n   - 원본 순서를 바꾸지 않는다. 컷 수는 가능한 한 적게.",
     "paced": "   - **모든 컷은 최소 1.5초 이상.** 그보다 짧은 컷은 만들지 않는다. 컷 길이는 1.5~4초 사이에서 장면에 맞게.\n   - 흐름은 전체 → 디테일 → 전체",
+    # 로블록스 한국어 릴스 조사: 10~20초마다 장면 전환일 때 조회수가 가장 높았고, 원테이크와 10초에 4번 이상은 낮았다.
+    "rhythm": "   - **10~20초마다 한 번 장면이 바뀌게 고른다.** 원본을 통으로 이어 쓰지 말고 하이라이트 구간만 골라 이어 붙인다. 한 컷은 5~20초.\n   - 컷 수는 최소 ⌈목표 길이 ÷ 20초⌉개(30초면 2~3컷). scenes.txt에 적힌 원본 장면 전환 시각도 장면 전환으로 센다.\n   - 10초 안에 장면이 4번 이상 바뀌는 빠른 편집(2.5초보다 짧은 컷 연속)은 하지 않는다.\n   - 원본 순서는 되도록 지킨다.",
+    # 로블록스 영어 릴스 관습(약 5초마다 전환). 컷 속도는 조회수와 관계가 없었다.
+    "flow": "   - **내용 흐름대로 자른다.** 늘어지는 구간은 버리고, 장면은 보통 3~8초마다 바뀌게 고른다.\n   - 원본 순서는 되도록 지킨다.",
 }
 
 
@@ -49,32 +53,38 @@ def copy_texts(cfg, dest):
 
 
 def cmd_new(a):
+    pre = presets.load(getattr(a, "preset", None))  # 직접 준 옵션 > 프리셋 > 기본값
     videos = [str(Path(v).resolve()) for v in a.video]
     info = probe(videos[0])
     layout = a.layout
     if layout == "auto":
         layout = "cover" if info["width"] / info["height"] < 0.7 else "fit"
+    cut = a.cut or pre.get("cut", "minimal")
     cfg = {
         "name": a.name,
         "id": project_id(a.name),
         "videos": videos,
         "situation": a.situation,
-        "style": str(Path(a.style or PKG / "assets" / "style.md").resolve()),
-        "rules": str(Path(a.rules or PKG / "assets" / "rules.md").resolve()),
-        "cut": a.cut,
+        "style": str(Path(a.style or pre.get("style") or PKG / "assets" / "style.md").resolve()),
+        "rules": str(Path(a.rules or pre.get("rules") or PKG / "assets" / "rules.md").resolve()),
+        "cut": cut,
         "layout": layout,
-        "length": a.length,
+        "frame": pre.get("frame", "blur") if layout == "fit" else "blur",
+        "length": a.length or pre.get("length", "15~30"),
         "model": a.model,
+        "preset": pre.get("name"),
+        "checks": pre.get("checks", {}),
         "cost": {},
     }
     save(cfg)
-    print(f"프로젝트 {a.name}: 영상 {len(videos)}개, 레이아웃 {layout}, 컷 {a.cut}")
+    print(f"프로젝트 {a.name}: 영상 {len(videos)}개, 레이아웃 {layout}, 컷 {cut}, 길이 {cfg['length']}초" + (f", 프리셋 {cfg['preset']}" if cfg["preset"] else ""))
     return cfg
 
 
 def cmd_prep(cfg):
     idx = make_sheets(cfg["videos"], WORK / cfg["name"] / "plan")
     print(f"원본 시트 {len(idx)}장")
+    presets.after_prep(cfg, WORK / cfg["name"])
 
 
 def revise(feedback, current):
@@ -114,6 +124,7 @@ def cmd_plan(cfg, feedback=None):
     plan["cuts"] = clamp([c for c in plan.get("cuts", []) if 0 <= int(c.get("src", 0)) < len(durations)], durations)
     if not plan["cuts"]:
         raise RuntimeError("Claude가 쓸 구간을 하나도 고르지 않았습니다")
+    plan, meta = presets.after_plan(cfg, plan, meta, prompt, d, durations)
     (WORK / cfg["name"] / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=1), encoding="utf-8")
     record(cfg, "plan", meta, resumed=bool(sess))
     save(cfg)
@@ -139,6 +150,8 @@ def layout_note(cfg):
     info = cfg["cut_info"]
     h = 1080 * info["height"] / info["width"]
     top = (1920 - h) / 2 / 1920
+    if cfg.get("frame") == "black":
+        return f"\n  원본 영상은 화면 가운데(y={top:.2f}~{1 - top:.2f})에 있고 위아래는 검은 여백입니다. 제목은 위 여백에 두고, 본문 자막 위치는 규칙 파일을 따르세요."
     return f"\n  원본 영상은 화면 가운데(y={top:.2f}~{1 - top:.2f})에 있고 위아래는 흐린 배경입니다. 자막을 위아래 빈 공간에 두면 영상을 가리지 않습니다."
 
 
@@ -180,6 +193,7 @@ def cmd_subs(cfg, feedback=None):
     subs, meta = ai.ask(prompt, d, cfg["model"], resume=sess)
     if not isinstance(subs.get("subs"), list):
         raise RuntimeError("Claude 응답에 subs 목록이 없습니다")
+    subs, meta = presets.after_subs(cfg, subs, meta, prompt, d)
     (w / "subs.json").write_text(json.dumps(subs, ensure_ascii=False, indent=1), encoding="utf-8")
     record(cfg, "subs", meta, resumed=bool(sess))
     save(cfg)
@@ -193,7 +207,7 @@ def cmd_export(cfg):
     w = WORK / cfg["name"]
     subs = json.loads((w / "subs.json").read_text(encoding="utf-8"))["subs"]
     info = cfg["cut_info"]
-    write_project(STUDIO, cfg["id"], w / "cut.mp4", subs, cfg["layout"], info["width"] / info["height"], info["duration"])
+    write_project(STUDIO, cfg["id"], w / "cut.mp4", subs, cfg["layout"], info["width"] / info["height"], info["duration"], frame=cfg.get("frame", "blur"))
     print(f"스튜디오에 등록: {cfg['id']}")
 
 
@@ -214,11 +228,12 @@ def main():
         p.add_argument("name")
         p.add_argument("--video", action="append", required=True)
         p.add_argument("--situation", required=True)
+        p.add_argument("--preset", choices=presets.names(), help="말투·규칙·기본값 묶음 (예: roblox_ko, roblox_en)")
         p.add_argument("--style")
         p.add_argument("--rules")
-        p.add_argument("--cut", choices=["minimal", "paced"], default="minimal")
+        p.add_argument("--cut", choices=list(CUT_RULES), help="기본 minimal (프리셋이 있으면 프리셋 값)")
         p.add_argument("--layout", choices=["auto", "cover", "fit"], default="auto")
-        p.add_argument("--length", default="15~30")
+        p.add_argument("--length", help="목표 길이(초), 예: 20~30. 기본 15~30 (프리셋이 있으면 프리셋 값)")
         p.add_argument("--model", default="claude-opus-5-5")
         if name == "all":
             p.add_argument("--no-render", action="store_true")
