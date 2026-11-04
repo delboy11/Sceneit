@@ -11,7 +11,7 @@
 ```
 
 - AI는 소리를 듣지 않고 0.5초마다 뽑은 화면을 보고 판단한다.
-- 3~4분 정도의 원본에 맞춰져 있다. 길수록 비용이 늘어난다(15~30초 결과물 기준 약 $1).
+- 3~4분 정도의 원본에 맞춰져 있다. 길수록 비용이 늘어난다(2분 20초 원본 → 20초대 결과물 기준 컷 약 $0.9 + 자막 약 $0.4, 채팅으로 고칠 때마다 $0.1~0.2).
 
 ## 준비물
 
@@ -63,6 +63,22 @@ python -m sceneit.run export 내영상
 python -m sceneit.run render 내영상
 ```
 
+## 채팅 편집 화면
+
+```bash
+python -m sceneit.app        # http://localhost:8000 (Remotion Studio도 3000번에 같이 띄움)
+```
+
+- 왼쪽은 편집 화면(Remotion Studio), 오른쪽은 채팅.
+- 오른쪽에서 원본 영상과 상황을 넣고 시작하면 단계별로 진행한다.
+  1. **컷 편집**: Claude가 쓸 구간을 고르고 자른다. 왼쪽에서 잘린 영상을 본다.
+  2. **자막**: Claude가 자막을 넣는다. 왼쪽에서 직접 고쳐도 된다.
+  3. **완성**: 최종 mp4를 렌더한다.
+- 단계마다 결과가 마음에 들면 **좋아요** 버튼으로 다음 단계, 아니면 채팅으로 고칠 점을 적는다. 그 단계만 다시 돈다.
+- 다시 돌릴 때는 같은 Claude 대화를 이어 가서(`claude -p --resume`) 이미 본 화면을 다시 읽지 않는다. 자막 단계에서는 편집 화면에서 직접 고친 내용을 기준으로 고친다.
+- 자막 단계에서 **← 컷 다시**로 돌아갈 수 있다. 컷을 다시 고치면 자막은 새로 쓴다.
+- 대화와 결과는 `work/<이름>/`(`chat.json`, `plan.json`, `subs.json`)에 남아서 서버를 다시 켜도 이어진다.
+
 ## 편집 화면
 
 ```bash
@@ -81,11 +97,12 @@ npm run studio
 | 경로 | 내용 |
 |---|---|
 | `sceneit/run.py` | 명령줄 진입점 |
+| `sceneit/app.py`, `sceneit/web/` | 채팅 편집 화면 (FastAPI + 단일 HTML) |
 | `sceneit/sheets.py` | 0.5초 간격 프레임을 4장씩 이어 붙인 시트 |
 | `sceneit/cut.py` | 고른 구간을 잘라 이어 붙임 (원본 소리 유지) |
 | `sceneit/ai.py` | `claude -p` 호출 |
 | `sceneit/export.py` | 자막 결과를 편집 화면 파일로 변환 |
-| `sceneit/prompts/` | 1단계(`plan.txt`), 2단계(`subs.txt`) 프롬프트 |
+| `sceneit/prompts/` | 1단계(`plan.txt`), 2단계(`subs.txt`), 고치기(`revise.txt`) 프롬프트 |
 | `sceneit/assets/` | 기본 규칙·말투 |
 | `studio/` | Remotion 프로젝트. 자막 효과는 Animate.css |
 

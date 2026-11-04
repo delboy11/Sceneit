@@ -77,28 +77,58 @@ def cmd_prep(cfg):
     print(f"원본 시트 {len(idx)}장")
 
 
-def cmd_plan(cfg):
+def revise(feedback, current):
+    return fill("revise.txt", feedback=feedback, current=current)
+
+
+def record(cfg, step, meta, resumed=False):
+    # claude -p는 --resume 하면 대화 전체 누적 비용을 준다. 이번 호출 비용은 이전 누적값을 빼서 구한다.
+    prev = cfg["cost"].get(step, {})
+    meta["total"] = meta["cost"]
+    if resumed and prev.get("session") == meta["session"]:
+        meta["cost"] = round(max(0.0, meta["total"] - prev.get("total", prev.get("cost", 0))), 6)
+    cfg["cost"][step] = meta
+    cfg.setdefault("session", {})[step] = meta["session"]
+    cfg["spent"] = round(cfg.get("spent", 0) + meta["cost"], 4)
+
+
+def plan_now(cfg):
+    p = WORK / cfg["name"] / "plan.json"
+    return f"```json\n{p.read_text(encoding='utf-8')}\n```" if p.exists() else "(아직 없음)"
+
+
+def cmd_plan(cfg, feedback=None):
     d = WORK / cfg["name"] / "plan"
-    idx = json.loads((d / "index.json").read_text())
-    copy_texts(cfg, d)
-    prompt = fill("plan.txt", situation=cfg["situation"], sheets=describe(idx), length=cfg["length"], cut_rule=CUT_RULES[cfg["cut"]])
-    (d / "prompt.txt").write_text(prompt, encoding="utf-8")
-    plan, meta = ai.ask(prompt, d, cfg["model"])
+    sess = cfg.get("session", {}).get("plan") if feedback else None
+    if sess:
+        prompt = revise(feedback, plan_now(cfg))
+    else:
+        idx = json.loads((d / "index.json").read_text())
+        copy_texts(cfg, d)
+        prompt = fill("plan.txt", situation=cfg["situation"], sheets=describe(idx), length=cfg["length"], cut_rule=CUT_RULES[cfg["cut"]])
+        if feedback:
+            prompt += "\n\n" + revise(feedback, plan_now(cfg))
+    (d / ("prompt_revise.txt" if feedback else "prompt.txt")).write_text(prompt, encoding="utf-8")
+    plan, meta = ai.ask(prompt, d, cfg["model"], resume=sess)
     durations = [probe(v)["duration"] for v in cfg["videos"]]
-    plan["cuts"] = clamp(plan["cuts"], durations)
+    plan["cuts"] = clamp([c for c in plan.get("cuts", []) if 0 <= int(c.get("src", 0)) < len(durations)], durations)
+    if not plan["cuts"]:
+        raise RuntimeError("Claude가 쓸 구간을 하나도 고르지 않았습니다")
     (WORK / cfg["name"] / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=1), encoding="utf-8")
-    cfg["cost"]["plan"] = meta
+    record(cfg, "plan", meta, resumed=bool(sess))
     save(cfg)
     total = sum(c["t1"] - c["t0"] for c in plan["cuts"])
     print(f"1단계: 컷 {len(plan['cuts'])}개, {total:.1f}초, ${meta['cost']:.3f}, {meta['seconds']:.0f}초 걸림")
     for c in plan["cuts"]:
         print(f"  v{c['src']} {c['t0']:>6.1f}~{c['t1']:>6.1f}  {c.get('scene', '')}")
+    return plan
 
 
 def cmd_cut(cfg):
     plan = json.loads((WORK / cfg["name"] / "plan.json").read_text(encoding="utf-8"))
     info = render_cut(cfg["videos"], plan["cuts"], WORK / cfg["name"] / "cut.mp4", cfg["layout"])
     cfg["cut_info"] = info
+    cfg.get("session", {}).pop("subs", None)  # 컷이 바뀌면 자막 대화는 새로 시작
     save(cfg)
     print(f"컷 영상 {info['width']}x{info['height']}, {info['duration']:.1f}초")
 
@@ -112,31 +142,51 @@ def layout_note(cfg):
     return f"\n  원본 영상은 화면 가운데(y={top:.2f}~{1 - top:.2f})에 있고 위아래는 흐린 배경입니다. 자막을 위아래 빈 공간에 두면 영상을 가리지 않습니다."
 
 
-def cmd_subs(cfg):
+def subs_now(cfg):
+    tsx = STUDIO / "src" / "projects" / f"{cfg['id']}.tsx"
+    if tsx.exists() and "<Sub" in tsx.read_text(encoding="utf-8"):
+        return (
+            "편집 화면 파일입니다. 사용자가 편집 화면에서 직접 고친 내용이 들어 있을 수 있으니 이것을 기준으로 고치세요. "
+            "from·durationInFrames는 30fps 프레임 단위입니다.\n```tsx\n" + tsx.read_text(encoding="utf-8") + "\n```"
+        )
+    p = WORK / cfg["name"] / "subs.json"
+    return f"```json\n{p.read_text(encoding='utf-8')}\n```" if p.exists() else "(아직 없음)"
+
+
+def cmd_subs(cfg, feedback=None):
     w = WORK / cfg["name"]
     d = w / "subs"
-    idx = make_sheets([w / "cut.mp4"], d, pad916=cfg["layout"] == "fit")
-    copy_texts(cfg, d)
-    shutil.copyfile(w / "plan.json", d / "plan.json")
-    fonts = make_font_sheets(STUDIO, d)
-    anim = (STUDIO / "src" / "animlist.ts").read_text()
-    (d / "effects.txt").write_text(anim.replace("export const ", "").replace("_FX", "").replace(" as const;", ""), encoding="utf-8")
-    prompt = fill(
-        "subs.txt",
-        situation=cfg["situation"],
-        duration=f"{cfg['cut_info']['duration']:.1f}",
-        sheets=describe(idx),
-        layout_note=layout_note(cfg),
-        font_sheets=", ".join(fonts),
-    )
-    (d / "prompt.txt").write_text(prompt, encoding="utf-8")
-    subs, meta = ai.ask(prompt, d, cfg["model"])
+    sess = cfg.get("session", {}).get("subs") if feedback else None
+    if sess:
+        prompt = revise(feedback, subs_now(cfg))
+    else:
+        idx = make_sheets([w / "cut.mp4"], d, pad916=cfg["layout"] == "fit")
+        copy_texts(cfg, d)
+        shutil.copyfile(w / "plan.json", d / "plan.json")
+        fonts = make_font_sheets(STUDIO, d)
+        anim = (STUDIO / "src" / "animlist.ts").read_text()
+        (d / "effects.txt").write_text(anim.replace("export const ", "").replace("_FX", "").replace(" as const;", ""), encoding="utf-8")
+        prompt = fill(
+            "subs.txt",
+            situation=cfg["situation"],
+            duration=f"{cfg['cut_info']['duration']:.1f}",
+            sheets=describe(idx),
+            layout_note=layout_note(cfg),
+            font_sheets=", ".join(fonts),
+        )
+        if feedback:
+            prompt += "\n\n" + revise(feedback, subs_now(cfg))
+    (d / ("prompt_revise.txt" if feedback else "prompt.txt")).write_text(prompt, encoding="utf-8")
+    subs, meta = ai.ask(prompt, d, cfg["model"], resume=sess)
+    if not isinstance(subs.get("subs"), list):
+        raise RuntimeError("Claude 응답에 subs 목록이 없습니다")
     (w / "subs.json").write_text(json.dumps(subs, ensure_ascii=False, indent=1), encoding="utf-8")
-    cfg["cost"]["subs"] = meta
+    record(cfg, "subs", meta, resumed=bool(sess))
     save(cfg)
     print(f"2단계: 자막 {len(subs['subs'])}개, ${meta['cost']:.3f}, {meta['seconds']:.0f}초 걸림")
     for s in subs["subs"]:
         print(f"  {s['t0']:>5.1f}~{s['t1']:>5.1f} {s.get('font')} {s.get('enter')}  {s['text'].replace(chr(10), ' / ')}")
+    return subs
 
 
 def cmd_export(cfg):
