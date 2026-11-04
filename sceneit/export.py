@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import shutil
@@ -5,7 +6,10 @@ from pathlib import Path
 
 
 def project_id(name):
+    # Remotion id는 영문·숫자·-만 된다. 한글 이름끼리 같은 id가 되지 않게 이름 해시를 붙인다.
     pid = re.sub(r"[^A-Za-z0-9-]+", "-", name).strip("-")
+    if not name.isascii():
+        pid = f"{pid or 'p'}-{hashlib.sha1(name.encode()).hexdigest()[:6]}"
     return pid or "project"
 
 

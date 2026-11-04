@@ -1,8 +1,19 @@
+import functools
 import shutil
 import subprocess
 from pathlib import Path
 
 from .media import probe
+
+# HDR → SDR 톤매핑. 결과는 항상 8비트 yuv420p + bt709 (브라우저에서 재생되는 형식).
+HDR_TO_SDR = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv"
+SDR_TAGS = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+
+
+@functools.cache
+def has_zscale():
+    out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True).stdout
+    return " zscale " in out
 
 
 def target_size(info, layout):
@@ -46,8 +57,9 @@ def render_cut(videos, cuts, out, layout):
         cmd = ["ffmpeg", "-v", "error", "-y", "-ss", str(c["t0"]), "-t", str(length), "-i", str(src)]
         if not infos[c["src"]]["audio"]:
             cmd += ["-f", "lavfi", "-t", str(length), "-i", "anullsrc=r=48000:cl=stereo"]
-        cmd += ["-vf", vf, "-map", "0:v:0", "-map", "0:a:0" if infos[c["src"]]["audio"] else "1:a:0"]
-        cmd += ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", str(seg)]
+        seg_vf = vf + ("," + HDR_TO_SDR if infos[c["src"]].get("hdr") and has_zscale() else "") + ",format=yuv420p"
+        cmd += ["-vf", seg_vf, "-map", "0:v:0", "-map", "0:a:0" if infos[c["src"]]["audio"] else "1:a:0"]
+        cmd += ["-c:v", "libx264", "-crf", "16", "-preset", "medium", *SDR_TAGS, "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", str(seg)]
         subprocess.run(cmd, check=True)
         lines.append(f"file '{seg.name}'")
     (tmp / "list.txt").write_text("\n".join(lines) + "\n")
