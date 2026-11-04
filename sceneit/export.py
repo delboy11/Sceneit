@@ -59,20 +59,3 @@ export const Component: React.FC = () => (
 );
 '''
     (studio / "src" / "projects" / f"{pid}.tsx").write_text(tsx, encoding="utf-8")
-    write_index(studio)
-
-
-def write_index(studio):
-    pdir = Path(studio) / "src" / "projects"
-    names = sorted(p.stem for p in pdir.glob("*.tsx"))
-    imports = "\n".join(f'import * as p{i} from "./{n}";' for i, n in enumerate(names))
-    mods = ", ".join(f"p{i}" for i in range(len(names)))
-    ts = f'''import type React from "react";
-{imports}
-
-type Mod = {{ meta: {{ id: string; frames: number }}; Component: React.FC }};
-const MODS: Mod[] = [{mods}];
-
-export const PROJECTS = MODS.map((m) => ({{ ...m.meta, component: m.Component }}));
-'''
-    (pdir / "index.ts").write_text(ts, encoding="utf-8")
